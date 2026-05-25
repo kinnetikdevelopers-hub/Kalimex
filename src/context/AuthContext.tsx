@@ -34,42 +34,61 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null)
   const [loading, setLoading] = useState(true)
 
-  // ----------------------------
-  // Load profile safely
-  // ----------------------------
+  // -----------------------------
+  // Safe profile loader (non-blocking)
+  // -----------------------------
   const loadProfile = async (userId: string): Promise<AppUser | null> => {
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', userId)
-      .maybeSingle()
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle()
 
-    if (error) {
-      console.error('Profile fetch error:', error)
-      return null
-    }
-
-    return data as AppUser | null
-  }
-
-  // ----------------------------
-  // Init auth session
-  // ----------------------------
-  useEffect(() => {
-    const init = async () => {
-      const { data: sessionData } = await supabase.auth.getSession()
-
-      if (sessionData?.session?.user) {
-        const profile = await loadProfile(sessionData.session.user.id)
-
-        if (profile) {
-          setUser(profile)
-        } else {
-          console.warn('No profile found for session user')
-        }
+      if (error) {
+        console.error('Profile fetch error:', error)
+        return null
       }
 
-      setLoading(false)
+      return data as AppUser | null
+    } catch (err) {
+      console.error('Profile fetch crashed:', err)
+      return null
+    }
+  }
+
+  // -----------------------------
+  // INIT SESSION (NEVER BLOCK UI)
+  // -----------------------------
+  useEffect(() => {
+    const init = async () => {
+      try {
+        const { data } = await supabase.auth.getSession()
+
+        const sessionUser = data?.session?.user
+
+        if (sessionUser) {
+          // IMPORTANT: do NOT block loading on profile fetch
+          loadProfile(sessionUser.id).then((profile) => {
+            if (profile) {
+              setUser(profile)
+            } else {
+              setUser({
+                id: sessionUser.id,
+                email: sessionUser.email ?? '',
+                full_name: 'User',
+                role: 'super_admin',
+                created_at: new Date().toISOString(),
+                is_active: true,
+              })
+            }
+          })
+        }
+      } catch (err) {
+        console.error('Session init error:', err)
+      } finally {
+        setLoading(false)
+      }
     }
 
     init()
@@ -77,23 +96,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const { data: { subscription } } =
       supabase.auth.onAuthStateChange(async (_event, session) => {
         if (session?.user) {
-          const profile = await loadProfile(session.user.id)
-
-          if (profile) {
-            setUser(profile)
-          } else {
-            console.warn('Missing profile for user:', session.user.id)
-
-            // fallback user (prevents login failure)
-            setUser({
-              id: session.user.id,
-              email: session.user.email ?? '',
-              full_name: 'User',
-              role: 'super_admin',
-              created_at: new Date().toISOString(),
-              is_active: true,
-            })
-          }
+          loadProfile(session.user.id).then((profile) => {
+            if (profile) {
+              setUser(profile)
+            } else {
+              setUser({
+                id: session.user.id,
+                email: session.user.email ?? '',
+                full_name: 'User',
+                role: 'super_admin',
+                created_at: new Date().toISOString(),
+                is_active: true,
+              })
+            }
+          })
         } else {
           setUser(null)
         }
@@ -104,76 +120,76 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => subscription.unsubscribe()
   }, [])
 
-  // ----------------------------
-  // SIGN IN (FIXED)
-  // ----------------------------
+  // -----------------------------
+  // SIGN IN (FIXED - NEVER HANGS UI)
+  // -----------------------------
   const signIn = async (
     email: string,
     password: string
   ): Promise<{ error: string | null }> => {
     console.log('LOGIN ATTEMPT:', email)
 
-    // Demo mode (only if truly no Supabase config)
-    if (isDemo()) {
-      console.warn('DEMO MODE ACTIVE')
-
-      const demo = DEMO_USERS[email.toLowerCase()]
-      if (demo && demo.password === password) {
-        const { password: _, ...userData } = demo
-        setUser(userData)
-        return { error: null }
+    try {
+      // Demo mode (only if truly misconfigured env)
+      if (isDemo()) {
+        const demo = DEMO_USERS[email.toLowerCase()]
+        if (demo && demo.password === password) {
+          const { password: _, ...userData } = demo
+          setUser(userData)
+          return { error: null }
+        }
+        return { error: 'Invalid email or password' }
       }
 
-      return { error: 'Invalid email or password' }
-    }
-
-    // Real Supabase login
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    })
-
-    if (error) {
-      console.error('AUTH ERROR:', error)
-      return { error: error.message }
-    }
-
-    if (!data.user) {
-      return { error: 'Login failed: no user returned' }
-    }
-
-    // Load profile (non-blocking)
-    const profile = await loadProfile(data.user.id)
-
-    if (profile) {
-      setUser(profile)
-    } else {
-      console.warn('Profile missing, using fallback user')
-
-      setUser({
-        id: data.user.id,
-        email: data.user.email ?? email,
-        full_name: 'User',
-        role: 'super_admin',
-        created_at: new Date().toISOString(),
-        is_active: true,
+      // REAL SUPABASE LOGIN
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
       })
-    }
 
-    return { error: null }
+      if (error) {
+        console.error('AUTH ERROR:', error)
+        return { error: error.message }
+      }
+
+      if (!data.user) {
+        return { error: 'Login failed: no user returned' }
+      }
+
+      // IMPORTANT: profile is OPTIONAL (never block login)
+      loadProfile(data.user.id).then((profile) => {
+        if (profile) {
+          setUser(profile)
+        } else {
+          setUser({
+            id: data.user.id,
+            email: data.user.email ?? email,
+            full_name: 'User',
+            role: 'super_admin',
+            created_at: new Date().toISOString(),
+            is_active: true,
+          })
+        }
+      })
+
+      return { error: null }
+    } catch (err: any) {
+      console.error('SIGNIN CRASH:', err)
+      return { error: 'Unexpected login error' }
+    }
   }
 
-  // ----------------------------
+  // -----------------------------
   // SIGN OUT
-  // ----------------------------
+  // -----------------------------
   const signOut = async () => {
     setUser(null)
     await supabase.auth.signOut()
   }
 
-  // ----------------------------
+  // -----------------------------
   // CHANGE PASSWORD
-  // ----------------------------
+  // -----------------------------
   const changePassword = async (
     current: string,
     newPass: string
@@ -197,9 +213,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { error: error?.message ?? null }
   }
 
-  // ----------------------------
+  // -----------------------------
   // ROLE CHECK
-  // ----------------------------
+  // -----------------------------
   const isRole = (...roles: UserRole[]) =>
     !!user && roles.includes(user.role)
 
