@@ -13,18 +13,6 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | null>(null)
 
-const DEMO_USERS: Record<string, AppUser & { password: string }> = {
-  'superadmin@kalimex.co.ke': {
-    id: 'sa-001',
-    email: 'superadmin@kalimex.co.ke',
-    password: 'kalimex2025',
-    full_name: 'Ibrahim Hamza',
-    role: 'super_admin',
-    created_at: new Date().toISOString(),
-    is_active: true,
-  },
-}
-
 const isDemo = () => {
   const url = (import.meta as any).env?.VITE_SUPABASE_URL || ''
   return !url || url.includes('placeholder') || url.includes('your-project')
@@ -33,10 +21,8 @@ const isDemo = () => {
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AppUser | null>(null)
   const [loading, setLoading] = useState(true)
+  const [initialized, setInitialized] = useState(false)
 
-  // -----------------------------
-  // Safe profile loader (non-blocking)
-  // -----------------------------
   const loadProfile = async (userId: string): Promise<AppUser | null> => {
     try {
       const { data, error } = await supabase
@@ -46,70 +32,68 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .maybeSingle()
 
       if (error) {
-        console.error('Profile fetch error:', error)
+        console.error('Profile error:', error)
         return null
       }
 
       return data as AppUser | null
     } catch (err) {
-      console.error('Profile fetch crashed:', err)
+      console.error('Profile crash:', err)
       return null
     }
   }
 
-  // -----------------------------
-  // INIT SESSION (NEVER BLOCK UI)
-  // -----------------------------
+  // -------------------------
+  // INIT SESSION (ONCE ONLY)
+  // -------------------------
   useEffect(() => {
     const init = async () => {
-      try {
-        const { data } = await supabase.auth.getSession()
+      const { data } = await supabase.auth.getSession()
 
-        const sessionUser = data?.session?.user
+      const sessionUser = data?.session?.user
 
-        if (sessionUser) {
-          // IMPORTANT: do NOT block loading on profile fetch
-          loadProfile(sessionUser.id).then((profile) => {
-            if (profile) {
-              setUser(profile)
-            } else {
-              setUser({
-                id: sessionUser.id,
-                email: sessionUser.email ?? '',
-                full_name: 'User',
-                role: 'super_admin',
-                created_at: new Date().toISOString(),
-                is_active: true,
-              })
-            }
-          })
-        }
-      } catch (err) {
-        console.error('Session init error:', err)
-      } finally {
-        setLoading(false)
+      if (sessionUser) {
+        const profile = await loadProfile(sessionUser.id)
+
+        setUser(
+          profile ?? {
+            id: sessionUser.id,
+            email: sessionUser.email ?? '',
+            full_name: 'User',
+            role: 'super_admin',
+            created_at: new Date().toISOString(),
+            is_active: true,
+          }
+        )
       }
+
+      setLoading(false)
+      setInitialized(true)
     }
 
     init()
 
+    // -------------------------
+    // AUTH LISTENER (FIXED)
+    // -------------------------
     const { data: { subscription } } =
-      supabase.auth.onAuthStateChange(async (_event, session) => {
+      supabase.auth.onAuthStateChange(async (event, session) => {
+        // IGNORE intermediate noise before init completes
+        if (!initialized) return
+
         if (session?.user) {
-          loadProfile(session.user.id).then((profile) => {
-            if (profile) {
-              setUser(profile)
-            } else {
-              setUser({
-                id: session.user.id,
-                email: session.user.email ?? '',
-                full_name: 'User',
-                role: 'super_admin',
-                created_at: new Date().toISOString(),
-                is_active: true,
-              })
+          const profile = await loadProfile(session.user.id)
+
+          setUser(
+            profile ?? {
+              id: session.user.id,
+              email: session.user.email ?? '',
+              full_name: 'User',
+              role: 'super_admin',
+              created_at: new Date().toISOString(),
+              is_active: true,
             }
-          })
+          )
         } else {
           setUser(null)
         }
@@ -118,93 +102,59 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       })
 
     return () => subscription.unsubscribe()
-  }, [])
+  }, [initialized])
 
-  // -----------------------------
-  // SIGN IN (FIXED - NEVER HANGS UI)
-  // -----------------------------
-  const signIn = async (
-    email: string,
-    password: string
-  ): Promise<{ error: string | null }> => {
-    console.log('LOGIN ATTEMPT:', email)
-
+  // -------------------------
+  // SIGN IN
+  // -------------------------
+  const signIn = async (email: string, password: string) => {
     try {
-      // Demo mode (only if truly misconfigured env)
-      if (isDemo()) {
-        const demo = DEMO_USERS[email.toLowerCase()]
-        if (demo && demo.password === password) {
-          const { password: _, ...userData } = demo
-          setUser(userData)
-          return { error: null }
-        }
-        return { error: 'Invalid email or password' }
-      }
-
-      // REAL SUPABASE LOGIN
       const { data, error } = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
       })
 
-      if (error) {
-        console.error('AUTH ERROR:', error)
-        return { error: error.message }
-      }
+      if (error) return { error: error.message }
+      if (!data.user) return { error: 'Login failed' }
 
-      if (!data.user) {
-        return { error: 'Login failed: no user returned' }
-      }
+      const profile = await loadProfile(data.user.id)
 
-      // IMPORTANT: profile is OPTIONAL (never block login)
-      loadProfile(data.user.id).then((profile) => {
-        if (profile) {
-          setUser(profile)
-        } else {
-          setUser({
-            id: data.user.id,
-            email: data.user.email ?? email,
-            full_name: 'User',
-            role: 'super_admin',
-            created_at: new Date().toISOString(),
-            is_active: true,
-          })
+      setUser(
+        profile ?? {
+          id: data.user.id,
+          email: data.user.email ?? email,
+          full_name: 'User',
+          role: 'super_admin',
+          created_at: new Date().toISOString(),
+          is_active: true,
         }
-      })
+      )
 
       return { error: null }
-    } catch (err: any) {
-      console.error('SIGNIN CRASH:', err)
+    } catch (err) {
       return { error: 'Unexpected login error' }
     }
   }
 
-  // -----------------------------
+  // -------------------------
   // SIGN OUT
-  // -----------------------------
+  // -------------------------
   const signOut = async () => {
-    setUser(null)
     await supabase.auth.signOut()
+    setUser(null)
   }
 
-  // -----------------------------
-  // CHANGE PASSWORD
-  // -----------------------------
-  const changePassword = async (
-    current: string,
-    newPass: string
-  ): Promise<{ error: string | null }> => {
-    if (!user) return { error: 'Not authenticated' }
-
+  // -------------------------
+  // PASSWORD
+  // -------------------------
+  const changePassword = async (current: string, newPass: string) => {
     const { error: signInErr } =
       await supabase.auth.signInWithPassword({
-        email: user.email,
+        email: user!.email,
         password: current,
       })
 
-    if (signInErr) {
-      return { error: 'Current password is incorrect' }
-    }
+    if (signInErr) return { error: 'Current password is incorrect' }
 
     const { error } = await supabase.auth.updateUser({
       password: newPass,
@@ -213,22 +163,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return { error: error?.message ?? null }
   }
 
-  // -----------------------------
-  // ROLE CHECK
-  // -----------------------------
   const isRole = (...roles: UserRole[]) =>
     !!user && roles.includes(user.role)
 
   return (
     <AuthContext.Provider
-      value={{
-        user,
-        loading,
-        signIn,
-        signOut,
-        changePassword,
-        isRole,
-      }}
+      value={{ user, loading, signIn, signOut, changePassword, isRole }}
     >
       {children}
     </AuthContext.Provider>
