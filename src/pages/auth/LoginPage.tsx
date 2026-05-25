@@ -46,15 +46,24 @@ export default function LoginPage() {
     })
     if (signUpErr) { setLoading(false); setError(signUpErr.message); return }
     if (data.user) {
-      await supabase.from('users').upsert({
-        id: data.user.id,
-        email: email.trim(),
-        full_name: fullName.trim(),
-        role: 'super_admin',
-        is_active: true,
-        created_at: new Date().toISOString(),
-      })
-    }
+  const { error: profileError } = await supabase
+    .from('users')
+    .upsert({
+      id: data.user.id,
+      email: email.trim(),
+      full_name: fullName.trim(),
+      role: 'super_admin',
+      is_active: true,
+      created_at: new Date().toISOString(),
+    })
+
+  if (profileError) {
+    console.error(profileError)
+    setError(profileError.message)
+    setLoading(false)
+    return
+  }
+}
     setLoading(false)
     setSuccess('Account created! Check your email to confirm, then sign in.')
     setMode('login')
